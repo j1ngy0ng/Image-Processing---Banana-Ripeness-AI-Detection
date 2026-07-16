@@ -10,8 +10,10 @@ from pathlib import Path
 import cv2
 import pandas as pd
 import streamlit as st
+from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 
-from smartbanana import Analysis, AnalysisError, analyse_bytes, assess_image, clear_history, create_pdf, load_history, save_record
+from smartbanana import Analysis, AnalysisError, analyse_bytes, assess_image, clear_history, create_pdf, load_history, mask_from_drawing, save_record
 
 
 st.set_page_config(page_title="SmartBanana", page_icon="🍌", layout="wide")
@@ -59,16 +61,53 @@ def show_result(result: Analysis, key: str = "result") -> None:
     tabs = st.tabs(["Visual evidence", "Measurements"])
     with tabs[0]:
         views = st.columns(4)
-        views[0].image(rgb(result.original), caption="Original", use_container_width=True)
-        views[1].image(rgb(result.enhanced), caption="Gaussian + CLAHE", use_container_width=True)
-        views[2].image(result.banana_mask, caption="Banana mask", use_container_width=True)
-        views[3].image(rgb(result.overlay), caption="Defects in red", use_container_width=True)
+        views[0].image(rgb(result.original), caption="Original", width="stretch")
+        views[1].image(rgb(result.enhanced), caption="Gaussian + CLAHE", width="stretch")
+        views[2].image(result.banana_mask, caption="Banana mask", width="stretch")
+        views[3].image(rgb(result.overlay), caption="Defects in red", width="stretch")
     with tabs[1]:
         left, right = st.columns([1, 2])
         colour_data = pd.DataFrame({"Percentage": [r["green_percentage"], r["yellow_percentage"], r["brown_percentage"]]}, index=["Green", "Yellow", "Brown / dark"])
         left.bar_chart(colour_data, color="#84cc16")
-        right.dataframe(pd.DataFrame([r]).T.rename(columns={0: "Value"}), use_container_width=True)
+        right.dataframe(pd.DataFrame({"Value": [str(value) for value in r.values()]}, index=r), width="stretch")
     st.download_button("Download PDF report", create_pdf(result), f"SmartBanana_{Path(r['file_name']).stem}.pdf", "application/pdf", key=f"pdf_{key}")
+
+
+def manual_boundary_editor(result: Analysis) -> None:
+    enabled = st.checkbox("Manually correct the banana boundary", key=f"manual_enabled_{result.record['record_id']}")
+    if not enabled:
+        return
+
+    st.caption("Click points around the banana. Right-click the final point to close and fill the polygon; use the toolbar to undo or reset.")
+    height, width = result.original.shape[:2]
+    scale = min(1.0, 700 / width)
+    canvas = st_canvas(
+        fill_color="rgba(132, 204, 22, 0.35)",
+        stroke_width=3,
+        stroke_color="#65a30d",
+        background_image=Image.fromarray(rgb(result.original)),
+        update_streamlit=True,
+        height=round(height * scale),
+        width=round(width * scale),
+        drawing_mode="polygon",
+        display_toolbar=True,
+        key=f"manual_canvas_{result.record['record_id']}",
+    )
+    if st.button("Apply manual boundary", type="primary", key=f"apply_manual_{result.record['record_id']}"):
+        try:
+            mask = mask_from_drawing(canvas.image_data, result.original.shape[:2])
+            corrected = assess_image(
+                result.original,
+                result.record["file_name"],
+                f"{result.record['input_type']} + manual boundary",
+                manual_mask=mask,
+            )
+            save_record(corrected.record, DB_PATH)
+            st.session_state.single_result = corrected
+            st.session_state.boundary_applied = True
+            st.rerun()
+        except AnalysisError as error:
+            st.error(str(error))
 
 
 page = st.sidebar.radio("Workspace", ["Analyse", "Batch", "Video", "History", "About"])
@@ -88,7 +127,10 @@ if page == "Analyse":
         except AnalysisError as error:
             st.error(str(error))
     if result := st.session_state.get("single_result"):
+        if st.session_state.pop("boundary_applied", False):
+            st.success("Manual boundary applied. All measurements and the PDF now use the corrected mask.")
         show_result(result, "single")
+        manual_boundary_editor(result)
 
 elif page == "Batch":
     st.subheader("Batch inspection")
@@ -111,7 +153,7 @@ elif page == "Batch":
     if results:
         records = [result.record for result in results]
         st.success(f"Processed {len(results)} image(s).")
-        st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
         st.download_button("Download batch CSV", records_csv(records), "SmartBanana_batch.csv", "text/csv")
         summary = pd.DataFrame(records)["ripeness_stage"].value_counts().rename_axis("Ripeness").to_frame("Images")
         st.bar_chart(summary, color="#65a30d")
@@ -152,15 +194,15 @@ elif page == "Video":
     results = st.session_state.get("video_results", [])
     if results:
         records = [result.record for result in results]
-        st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
         st.download_button("Download video results", records_csv(records), "SmartBanana_video.csv", "text/csv")
-        st.image(rgb(results[-1].overlay), caption="Last sampled frame", use_container_width=True)
+        st.image(rgb(results[-1].overlay), caption="Last sampled frame", width="stretch")
 
 elif page == "History":
     st.subheader("Inspection history")
     records = load_history(DB_PATH)
     if records:
-        st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
         st.download_button("Download history CSV", records_csv(records), "SmartBanana_history.csv", "text/csv")
         if st.checkbox("I want to delete all history") and st.button("Delete history"):
             clear_history(DB_PATH)
@@ -186,4 +228,3 @@ else:
 
     Results describe visible external condition only; they are not a food-safety or internal-quality test.
     """)
-

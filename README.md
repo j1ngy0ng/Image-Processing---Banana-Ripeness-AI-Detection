@@ -10,6 +10,7 @@ SmartBanana is an explainable, classical image-processing system for banana ripe
 - Peel-colour percentages and connected-component defect measurement
 - Grade A/B/C, shelf-life estimate, recommendation, and confidence score
 - Batch image and MP4 frame processing
+- Optional mouse-drawn boundary correction for difficult backgrounds
 - SQLite history, CSV export, dashboard charts, and illustrated PDF reports
 
 ## Run
@@ -30,6 +31,6 @@ Open the local URL shown by Streamlit (normally `http://localhost:8501`). For re
 
 ## Method and limits
 
-The pipeline resizes each image, applies a 5×5 Gaussian filter and CLAHE, segments banana-coloured pixels in HSV, cleans the mask with opening/closing, and retains the largest contour. HSV colour ranges determine ripeness, while connected dark regions determine defect percentage. Following the report flowchart, defect area below 5% is Grade A, below 10% is Grade B, and 10% or more is Grade C.
+The pipeline resizes each image, applies a 5×5 Gaussian filter and CLAHE, segments banana-coloured pixels in HSV, cleans the mask with opening/closing, and retains the largest contour. If automatic segmentation is inaccurate, enable the manual boundary editor, click around the banana, right-click to close the polygon, and apply it. HSV colour ranges determine ripeness, while connected dark regions determine defect percentage. Following the report flowchart, defect area below 5% is Grade A, below 10% is Grade B, and 10% or more is Grade C.
 
 This is an external visual assessment, not a food-safety test. Complex backgrounds, yellow background objects, overlapping fruit, extreme lighting, blur, and hidden fruit can reduce reliability. Thresholds are intentionally kept in `smartbanana.py` so they can be calibrated for the final camera environment.

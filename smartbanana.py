@@ -53,6 +53,19 @@ def _preprocess(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(cv2.merge((lightness, a, b)), cv2.COLOR_LAB2BGR)
 
 
+def _largest_mask(mask: np.ndarray) -> np.ndarray:
+    mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise AnalysisError("No usable banana boundary was found.")
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) < mask.shape[0] * mask.shape[1] * 0.02:
+        raise AnalysisError("The banana boundary is too small. Draw it again or move the banana closer.")
+    final_mask = np.zeros(mask.shape, np.uint8)
+    cv2.drawContours(final_mask, [contour], -1, 255, cv2.FILLED)
+    return final_mask
+
+
 def _segment(hsv: np.ndarray) -> np.ndarray:
     # Banana peel spans brown/orange/yellow/green; saturation rejects white/grey/black backgrounds.
     mask = cv2.inRange(hsv, (0, 35, 25), (95, 255, 255))
@@ -60,15 +73,16 @@ def _segment(hsv: np.ndarray) -> np.ndarray:
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise AnalysisError("No banana was detected. Use one clear banana on a contrasting background.")
-    contour = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(contour) < hsv.shape[0] * hsv.shape[1] * 0.02:
-        raise AnalysisError("The detected banana is too small. Move it closer to the camera.")
-    final_mask = np.zeros(mask.shape, np.uint8)
-    cv2.drawContours(final_mask, [contour], -1, 255, cv2.FILLED)
-    return final_mask
+    return _largest_mask(mask)
+
+
+def mask_from_drawing(drawing: np.ndarray | None, target_shape: tuple[int, int]) -> np.ndarray:
+    """Convert the drawable canvas's transparent RGBA layer into a binary mask."""
+    if drawing is None or drawing.ndim != 3 or drawing.shape[2] < 4:
+        raise AnalysisError("Draw and close a boundary before applying it.")
+    mask = (drawing[:, :, 3] > 10).astype(np.uint8) * 255
+    mask = cv2.resize(mask, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_NEAREST)
+    return _largest_mask(mask)
 
 
 def _percentage(binary: np.ndarray, fruit_area: int) -> float:
@@ -83,7 +97,12 @@ def grade_quality(defect_percentage: float) -> str:
     return "C"
 
 
-def assess_image(image: np.ndarray, file_name: str = "image.jpg", input_type: str = "image") -> Analysis:
+def assess_image(
+    image: np.ndarray,
+    file_name: str = "image.jpg",
+    input_type: str = "image",
+    manual_mask: np.ndarray | None = None,
+) -> Analysis:
     if image is None or image.ndim != 3 or image.shape[2] != 3:
         raise AnalysisError("A three-channel colour image is required.")
 
@@ -91,7 +110,11 @@ def assess_image(image: np.ndarray, file_name: str = "image.jpg", input_type: st
     original = _resize(image)
     enhanced = _preprocess(original)
     hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
-    banana_mask = _segment(hsv)
+    if manual_mask is None:
+        banana_mask = _segment(hsv)
+    else:
+        manual_mask = cv2.resize(np.asarray(manual_mask), (original.shape[1], original.shape[0]), interpolation=cv2.INTER_NEAREST)
+        banana_mask = _largest_mask(manual_mask)
     fruit_area = cv2.countNonZero(banana_mask)
 
     h, s, v = cv2.split(hsv)
@@ -120,13 +143,14 @@ def assess_image(image: np.ndarray, file_name: str = "image.jpg", input_type: st
     defect_area = cv2.countNonZero(defect_mask)
     defect_pct = round(100 * defect_area / fruit_area, 2)
 
-    # Thresholds calibrated on the repository dataset; keep green first so natural shadows
-    # on unripe peel affect quality grade without changing the physiological stage.
-    if green_pct >= 40:
+    # Calibrated on clean, source-grouped dataset labels; augmented copies stay together.
+    if green_pct >= 20:
         ripeness = "Unripe"
-    elif defect_pct >= 50 or brown_pct >= 30:
+    elif defect_pct >= 60 or brown_pct >= 50 or (defect_pct >= 35 and brown_pct >= 35):
         ripeness = "Spoiled"
-    elif defect_pct >= 25 or brown_pct >= 20:
+    elif yellow_pct >= 65 and defect_pct < 25:
+        ripeness = "Ripe"
+    elif defect_pct >= 25 or brown_pct >= 15:
         ripeness = "Overripe"
     else:
         ripeness = "Ripe"
