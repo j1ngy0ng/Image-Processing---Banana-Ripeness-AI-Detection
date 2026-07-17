@@ -14,12 +14,26 @@ import cv2
 import numpy as np
 
 
+_CLEAR_BANANA_MESSAGE = (
+    "No clear banana was detected. Upload or capture a clearer image with one "
+    "banana on a plain, contrasting background."
+)
+# ponytail: geometry keeps validation dependency-free; use a trained detector only
+# if evaluation data shows these conservative limits no longer generalise.
+_MIN_BOUNDARY_RATIO = 0.02
+_MAX_BOUNDARY_RATIO = 0.90
+_MAX_CIRCULARITY = 0.82
+_MAX_RECTANGULARITY = 0.95
+
+
 class AnalysisError(ValueError):
     """Raised when an input cannot be analysed reliably."""
 
 
 @dataclass
 class Analysis:
+    """Complete output required by the interface, database, and PDF report."""
+
     record: dict[str, Any]
     original: np.ndarray
     enhanced: np.ndarray
@@ -28,7 +42,11 @@ class Analysis:
     overlay: np.ndarray
 
 
+# Image preparation and banana segmentation
+
+
 def decode_image(data: bytes) -> np.ndarray:
+    """Decode an uploaded image and reject empty or unsupported content."""
     if not data:
         raise AnalysisError("The uploaded file is empty.")
     image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
@@ -38,6 +56,7 @@ def decode_image(data: bytes) -> np.ndarray:
 
 
 def _resize(image: np.ndarray, maximum: int = 1024) -> np.ndarray:
+    """Downscale large images while preserving aspect ratio and smaller inputs."""
     height, width = image.shape[:2]
     scale = min(1.0, maximum / max(height, width))
     if scale == 1:
@@ -46,6 +65,7 @@ def _resize(image: np.ndarray, maximum: int = 1024) -> np.ndarray:
 
 
 def _preprocess(image: np.ndarray) -> np.ndarray:
+    """Reduce noise and improve local contrast without distorting peel colour."""
     blurred = cv2.GaussianBlur(image, (5, 5), 0)
     lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB)
     lightness, a, b = cv2.split(lab)
@@ -53,27 +73,50 @@ def _preprocess(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(cv2.merge((lightness, a, b)), cv2.COLOR_LAB2BGR)
 
 
-def _largest_mask(mask: np.ndarray) -> np.ndarray:
+def _is_plausible_banana(contour: np.ndarray, image_area: int) -> bool:
+    """Reject full-frame backgrounds and simple circular or rectangular objects."""
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+    rectangle_width, rectangle_height = cv2.minAreaRect(contour)[1]
+    rectangle_area = rectangle_width * rectangle_height
+
+    circularity = 4 * np.pi * area / max(perimeter**2, 1)
+    rectangularity = area / max(rectangle_area, 1)
+    return (
+        area / image_area <= _MAX_BOUNDARY_RATIO
+        and circularity <= _MAX_CIRCULARITY
+        and rectangularity <= _MAX_RECTANGULARITY
+    )
+
+
+def _largest_mask(mask: np.ndarray, *, validate_shape: bool = False) -> np.ndarray:
+    """Return the largest valid filled contour from a binary candidate mask."""
     mask = np.where(mask > 0, 255, 0).astype(np.uint8)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        raise AnalysisError("No usable banana boundary was found.")
+        raise AnalysisError(_CLEAR_BANANA_MESSAGE)
+
     contour = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(contour) < mask.shape[0] * mask.shape[1] * 0.02:
+    image_area = mask.shape[0] * mask.shape[1]
+    if cv2.contourArea(contour) < image_area * _MIN_BOUNDARY_RATIO:
         raise AnalysisError("The banana boundary is too small. Draw it again or move the banana closer.")
+    if validate_shape and not _is_plausible_banana(contour, image_area):
+        raise AnalysisError(_CLEAR_BANANA_MESSAGE)
+
     final_mask = np.zeros(mask.shape, np.uint8)
     cv2.drawContours(final_mask, [contour], -1, 255, cv2.FILLED)
     return final_mask
 
 
 def _segment(hsv: np.ndarray) -> np.ndarray:
+    """Create and clean the automatic banana-colour mask in HSV space."""
     # Banana peel spans brown/orange/yellow/green; saturation rejects white/grey/black backgrounds.
     mask = cv2.inRange(hsv, (0, 35, 25), (95, 255, 255))
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
-    return _largest_mask(mask)
+    return _largest_mask(mask, validate_shape=True)
 
 
 def mask_from_drawing(drawing: np.ndarray | None, target_shape: tuple[int, int]) -> np.ndarray:
@@ -85,11 +128,15 @@ def mask_from_drawing(drawing: np.ndarray | None, target_shape: tuple[int, int])
     return _largest_mask(mask)
 
 
+# Feature measurement and decision rules
+
+
 def _percentage(binary: np.ndarray, fruit_area: int) -> float:
     return round(100 * cv2.countNonZero(binary) / fruit_area, 2)
 
 
 def grade_quality(defect_percentage: float) -> str:
+    """Map the measured defect percentage to assignment grades A, B, or C."""
     if defect_percentage < 5:
         return "A"
     if defect_percentage < 10:
@@ -103,6 +150,7 @@ def assess_image(
     input_type: str = "image",
     manual_mask: np.ndarray | None = None,
 ) -> Analysis:
+    """Run the complete explainable assessment pipeline on one BGR image."""
     if image is None or image.ndim != 3 or image.shape[2] != 3:
         raise AnalysisError("A three-channel colour image is required.")
 
@@ -110,6 +158,8 @@ def assess_image(
     original = _resize(image)
     enhanced = _preprocess(original)
     hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
+    # Manual masks intentionally bypass automatic shape checks: the user has
+    # explicitly identified the region, but minimum-area validation still applies.
     if manual_mask is None:
         banana_mask = _segment(hsv)
     else:
@@ -119,6 +169,7 @@ def assess_image(
 
     h, s, v = cv2.split(hsv)
     inside = banana_mask > 0
+    # Every colour measurement is restricted to the selected banana region.
     green = ((h >= 36) & (h <= 95) & (s >= 40) & (v >= 30) & inside).astype(np.uint8) * 255
     brown_pixels = ((h < 18) & (s >= 40) & (v >= 20) & (v <= 140) & inside) | ((v < 55) & inside)
     yellow_pixels = (h >= 10) & (h <= 35) & (s >= 40) & (v >= 80) & inside & ~brown_pixels
@@ -129,6 +180,7 @@ def assess_image(
     yellow_pct = _percentage(yellow, fruit_area)
     brown_pct = _percentage(brown, fruit_area)
 
+    # Connected-component filtering removes isolated dark pixels caused by noise.
     dark = ((((v < 105) & (s >= 25)) | ((h < 18) & (s >= 55) & (v < 170))) & inside).astype(np.uint8) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel)
@@ -143,7 +195,9 @@ def assess_image(
     defect_area = cv2.countNonZero(defect_mask)
     defect_pct = round(100 * defect_area / fruit_area, 2)
 
-    # Calibrated on clean, source-grouped dataset labels; augmented copies stay together.
+    # Rules are ordered deliberately: green fruit takes precedence, followed by
+    # severe spoilage, strong yellow ripeness, and moderate over-ripeness.
+    # Thresholds were calibrated on source-grouped data to avoid augmentation leakage.
     if green_pct >= 20:
         ripeness = "Unripe"
     elif defect_pct >= 60 or brown_pct >= 50 or (defect_pct >= 35 and brown_pct >= 35):
@@ -166,6 +220,7 @@ def assess_image(
     else:
         recommendation = "Ready for normal sale or consumption."
 
+    # Confidence is an explainable colour-separation heuristic, not a probability.
     scores = sorted((green_pct, yellow_pct, brown_pct), reverse=True)
     coverage = min(100.0, sum(scores))
     confidence = round(min(99.0, 55 + 0.3 * (scores[0] - scores[1]) + 0.15 * coverage), 1)
@@ -205,7 +260,11 @@ def assess_image(
 
 
 def analyse_bytes(data: bytes, file_name: str = "image.jpg", input_type: str = "image") -> Analysis:
+    """Decode uploaded bytes and run the shared image-assessment pipeline."""
     return assess_image(decode_image(data), file_name, input_type)
+
+
+# SQLite persistence
 
 
 _FIELDS = (
@@ -217,6 +276,7 @@ _FIELDS = (
 
 
 def _connect(db_path: str | Path) -> sqlite3.Connection:
+    """Open the history database and create its schema on first use."""
     connection = sqlite3.connect(db_path)
     columns = ", ".join(f"{name} TEXT" for name in _FIELDS)
     connection.execute(f"CREATE TABLE IF NOT EXISTS analyses ({columns}, PRIMARY KEY (record_id))")
@@ -224,6 +284,7 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def save_record(record: dict[str, Any], db_path: str | Path = "smartbanana.db") -> None:
+    """Insert or replace one successful analysis record."""
     with _connect(db_path) as connection:
         names = ", ".join(_FIELDS)
         placeholders = ", ".join("?" for _ in _FIELDS)
@@ -234,17 +295,23 @@ def save_record(record: dict[str, Any], db_path: str | Path = "smartbanana.db") 
 
 
 def load_history(db_path: str | Path = "smartbanana.db") -> list[dict[str, Any]]:
+    """Return saved records in reverse chronological order."""
     with _connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         return [dict(row) for row in connection.execute("SELECT * FROM analyses ORDER BY date_time DESC")]
 
 
 def clear_history(db_path: str | Path = "smartbanana.db") -> None:
+    """Delete all saved analysis records while retaining the database schema."""
     with _connect(db_path) as connection:
         connection.execute("DELETE FROM analyses")
 
 
+# PDF report generation
+
+
 def _png(image: np.ndarray) -> BytesIO:
+    """Encode an OpenCV image as an in-memory PNG for ReportLab."""
     ok, encoded = cv2.imencode(".png", image)
     if not ok:
         raise AnalysisError("A report image could not be encoded.")
@@ -252,6 +319,8 @@ def _png(image: np.ndarray) -> BytesIO:
 
 
 def create_pdf(analysis: Analysis) -> bytes:
+    """Build a self-contained PDF containing results and processing evidence."""
+    # Import ReportLab lazily because most analyses are viewed without a PDF export.
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4

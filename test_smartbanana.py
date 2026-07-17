@@ -2,8 +2,17 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
-from smartbanana import assess_image, create_pdf, grade_quality, load_history, mask_from_drawing, save_record
+from smartbanana import (
+    AnalysisError,
+    assess_image,
+    create_pdf,
+    grade_quality,
+    load_history,
+    mask_from_drawing,
+    save_record,
+)
 
 
 def banana(colour, defect=None):
@@ -32,6 +41,22 @@ def test_grade_boundaries():
     assert grade_quality(10) == "C"
 
 
+@pytest.mark.parametrize("colour", [(0, 0, 255), (0, 255, 255), (0, 255, 0)])
+def test_rejects_full_frame_colour_as_a_banana(colour):
+    image = np.full((300, 400, 3), colour, np.uint8)
+
+    with pytest.raises(AnalysisError, match="No clear banana was detected"):
+        assess_image(image)
+
+
+def test_rejects_simple_coloured_shapes_as_bananas():
+    image = np.full((400, 600, 3), 245, np.uint8)
+    cv2.rectangle(image, (100, 100), (500, 300), (0, 215, 245), -1)
+
+    with pytest.raises(AnalysisError, match="No clear banana was detected"):
+        assess_image(image)
+
+
 def test_history_and_pdf(tmp_path: Path):
     result = assess_image(banana((0, 215, 245), (30, (10, 40, 60))), "sample.jpg")
     database = tmp_path / "history.db"
@@ -45,7 +70,7 @@ def test_history_and_pdf(tmp_path: Path):
 
 def test_manual_boundary_overrides_automatic_segmentation():
     image = np.full((400, 600, 3), 245, np.uint8)
-    cv2.rectangle(image, (20, 20), (300, 190), (45, 165, 90), -1)
+    cv2.ellipse(image, (205, 155), (170, 65), -8, 15, 345, (45, 165, 90), 70)
     cv2.ellipse(image, (430, 280), (125, 55), 0, 0, 360, (0, 215, 245), -1)
     automatic = assess_image(image)
 

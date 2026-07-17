@@ -1,4 +1,4 @@
-"""Streamlit interface for SmartBanana."""
+"""Streamlit interface for SmartBanana's image, batch, video, and history workflows."""
 
 from __future__ import annotations
 
@@ -13,7 +13,17 @@ import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-from smartbanana import Analysis, AnalysisError, analyse_bytes, assess_image, clear_history, create_pdf, load_history, mask_from_drawing, save_record
+from smartbanana import (
+    Analysis,
+    AnalysisError,
+    analyse_bytes,
+    assess_image,
+    clear_history,
+    create_pdf,
+    load_history,
+    mask_from_drawing,
+    save_record,
+)
 
 
 st.set_page_config(page_title="SmartBanana", page_icon="🍌", layout="wide")
@@ -34,11 +44,15 @@ st.markdown(
 DB_PATH = Path("smartbanana.db")
 
 
+# Shared presentation and export helpers
+
 def rgb(image):
+    """Convert OpenCV's BGR images to the RGB order expected by Streamlit."""
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if image.ndim == 3 else image
 
 
 def records_csv(records: list[dict]) -> bytes:
+    """Serialize result records for Streamlit download buttons."""
     if not records:
         return b""
     output = StringIO()
@@ -49,6 +63,7 @@ def records_csv(records: list[dict]) -> bytes:
 
 
 def show_result(result: Analysis, key: str = "result") -> None:
+    """Render one analysis result, its evidence, measurements, and PDF export."""
     r = result.record
     cols = st.columns(5)
     cols[0].metric("Ripeness", r["ripeness_stage"])
@@ -74,12 +89,14 @@ def show_result(result: Analysis, key: str = "result") -> None:
 
 
 def manual_boundary_editor(result: Analysis) -> None:
+    """Let the user replace the automatic mask with a mouse-drawn polygon."""
     enabled = st.checkbox("Manually correct the banana boundary", key=f"manual_enabled_{result.record['record_id']}")
     if not enabled:
         return
 
     st.caption("Click points around the banana. Right-click the final point to close and fill the polygon; use the toolbar to undo or reset.")
     height, width = result.original.shape[:2]
+    # Limit canvas width while retaining the original aspect ratio.
     scale = min(1.0, 700 / width)
     canvas = st_canvas(
         fill_color="rgba(132, 204, 22, 0.35)",
@@ -110,14 +127,23 @@ def manual_boundary_editor(result: Analysis) -> None:
             st.error(str(error))
 
 
+# Workspace navigation
 page = st.sidebar.radio("Workspace", ["Analyse", "Batch", "Video", "History", "About"])
 st.sidebar.caption("Classical OpenCV pipeline • No AI model")
 
+# Single-image workspace
 if page == "Analyse":
     st.subheader("Single banana inspection")
     method = st.radio("Input method", ["Upload", "Camera"], horizontal=True)
-    uploaded = st.file_uploader("Upload one clear banana image", ["jpg", "jpeg", "png"]) if method == "Upload" else st.camera_input("Capture one clear banana")
+    uploaded = (
+        st.file_uploader("Upload one clear banana image", ["jpg", "jpeg", "png"])
+        if method == "Upload"
+        else st.camera_input("Capture one clear banana")
+    )
     if uploaded and st.button("Analyse banana", type="primary"):
+        # A failed attempt must not leave the previous successful result on screen.
+        st.session_state.pop("single_result", None)
+        st.session_state.pop("boundary_applied", None)
         try:
             if uploaded.size > 15 * 1024 * 1024:
                 raise AnalysisError("The image is larger than 15 MB.")
@@ -132,6 +158,7 @@ if page == "Analyse":
         show_result(result, "single")
         manual_boundary_editor(result)
 
+# Batch workspace: invalid files are reported without stopping the remaining files.
 elif page == "Batch":
     st.subheader("Batch inspection")
     files = st.file_uploader("Upload multiple banana images", ["jpg", "jpeg", "png"], accept_multiple_files=True)
@@ -161,6 +188,7 @@ elif page == "Batch":
             with st.expander(result.record["file_name"]):
                 show_result(result, f"batch_{index}")
 
+# Video workspace: sample frames instead of processing every frame unnecessarily.
 elif page == "Video":
     st.subheader("Video frame analysis")
     video = st.file_uploader("Upload an MP4 video", ["mp4"])
@@ -169,6 +197,7 @@ elif page == "Video":
     if video and st.button("Analyse video", type="primary"):
         results, errors = [], 0
         suffix = Path(video.name).suffix
+        # OpenCV's VideoCapture requires a filesystem path, so persist the upload briefly.
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
             temporary.write(video.getvalue())
             path = temporary.name
@@ -198,6 +227,7 @@ elif page == "Video":
         st.download_button("Download video results", records_csv(records), "SmartBanana_video.csv", "text/csv")
         st.image(rgb(results[-1].overlay), caption="Last sampled frame", width="stretch")
 
+# History workspace
 elif page == "History":
     st.subheader("Inspection history")
     records = load_history(DB_PATH)
@@ -210,6 +240,7 @@ elif page == "History":
     else:
         st.info("No inspections have been saved yet.")
 
+# About workspace
 else:
     st.subheader("How SmartBanana works")
     st.write("SmartBanana follows the assignment report exactly: image resizing → Gaussian filtering → CLAHE → HSV segmentation → morphology → largest-contour isolation → peel-colour and connected-defect analysis → rule-based recommendations.")
