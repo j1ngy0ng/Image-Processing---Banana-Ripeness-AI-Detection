@@ -1,13 +1,17 @@
+import re
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
+from interactive_overlay import _thumbnail_images
 from smartbanana import (
     AnalysisError,
     assess_image,
+    classify_ripeness,
     create_pdf,
+    create_pdf_report,
     grade_quality,
     load_history,
     mask_from_drawing,
@@ -32,13 +36,34 @@ def test_ripeness_and_evidence():
     assert spoiled.record["ripeness_stage"] == "Spoiled"
     assert cv2.countNonZero(ripe.banana_mask) > 10_000
     assert ripe.overlay.shape == ripe.original.shape
+    assert ripe.region_map.shape == ripe.banana_mask.shape
+    assert set(np.unique(ripe.region_map)).issubset({0, 1, 2, 3})
+
+
+def test_hover_evidence_is_a_compact_thumbnail():
+    overlay = np.zeros((800, 400, 3), np.uint8)
+    region_map = np.tile(np.arange(4, dtype=np.uint8), (800, 100))
+
+    thumbnail, thumbnail_map = _thumbnail_images(overlay, region_map)
+
+    assert thumbnail.shape == (240, 120, 3)
+    assert thumbnail_map.shape == (240, 120)
+    assert set(np.unique(thumbnail_map)) == {0, 1, 2, 3}
 
 
 def test_grade_boundaries():
-    assert grade_quality(4.99) == "A"
-    assert grade_quality(5) == "B"
-    assert grade_quality(9.99) == "B"
-    assert grade_quality(10) == "C"
+    assert grade_quality(19.99) == "A"
+    assert grade_quality(20) == "B"
+    assert grade_quality(50) == "B"
+    assert grade_quality(50.01) == "C"
+
+
+def test_published_bbch_ripeness_boundaries():
+    assert classify_ripeness(51, 49, 0) == "Unripe"
+    assert classify_ripeness(49, 51, 0) == "Ripe"
+    assert classify_ripeness(0, 80, 20) == "Overripe"
+    assert classify_ripeness(0, 50, 50) == "Overripe"
+    assert classify_ripeness(0, 49.99, 50.01) == "Spoiled"
 
 
 @pytest.mark.parametrize("colour", [(0, 0, 255), (0, 255, 255), (0, 255, 0)])
@@ -66,6 +91,9 @@ def test_history_and_pdf(tmp_path: Path):
     assert history[0]["file_name"] == "sample.jpg"
     pdf = create_pdf(result)
     assert pdf.startswith(b"%PDF") and len(pdf) > 5_000
+    assert len(re.findall(rb"/Type\s*/Page\b", pdf)) == 1
+    combined_pdf = create_pdf_report([result, result], "Batch Test Report")
+    assert len(re.findall(rb"/Type\s*/Page\b", combined_pdf)) == 3
 
 
 def test_manual_boundary_overrides_automatic_segmentation():

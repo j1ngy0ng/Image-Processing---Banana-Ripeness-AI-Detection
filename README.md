@@ -8,10 +8,12 @@ SmartBanana is an explainable, classical image-processing system for banana ripe
 - Four outcomes: Unripe, Ripe, Overripe, and Spoiled
 - Gaussian filtering, CLAHE, HSV segmentation, morphology, and contour isolation
 - Peel-colour percentages and connected-component defect measurement
-- Grade A/B/C, shelf-life estimate, recommendation, and confidence score
+- BBCH-based surface-condition Grade A/B/C, referenced shelf-life guidance, recommendation, and confidence score
 - Batch image and MP4 frame processing
 - Optional mouse-drawn boundary correction for difficult backgrounds
-- SQLite history, CSV export, dashboard charts, and illustrated PDF reports
+- First-visit safety agreement before analysis features are available
+- Interactive colour overlay with green, yellow, and defect percentages on hover
+- SQLite history, dashboard charts, and illustrated single, batch, and video PDF reports
 
 ## Run
 
@@ -31,6 +33,10 @@ Open the local URL shown by Streamlit (normally `http://localhost:8501`). For re
 
 ## Method and limits
 
-The pipeline resizes each image, applies a 5×5 Gaussian filter and CLAHE, segments banana-coloured pixels in HSV, cleans the mask with opening/closing, and retains the largest contour. If automatic segmentation is inaccurate, enable the manual boundary editor, click around the banana, right-click to close the polygon, and apply it. HSV colour ranges determine ripeness, while connected dark regions determine defect percentage. Following the report flowchart, defect area below 5% is Grade A, below 10% is Grade B, and 10% or more is Grade C.
+The pipeline resizes each image, applies a 5×5 Gaussian filter and CLAHE, segments banana-coloured pixels in HSV, cleans the mask with opening/closing, and retains the largest contour. If automatic segmentation is inaccurate, enable the manual boundary editor, click around the banana, right-click to close the polygon, and apply it. HSV colour ranges determine ripeness, while connected dark regions determine defect percentage. The decision rules follow the published BBCH scale for edible Musaceae: green-dominant fruit is unripe, yellow-dominant fruit with less than 20% brown surface is ripe, 20–50% brown surface is overripe, and more than 50% brown surface is spoiled. Project quality grades reuse the same referenced surface boundaries: Grade A is below 20%, Grade B is 20–50%, and Grade C is above 50%.
 
-This is an external visual assessment, not a food-safety test. Complex backgrounds, yellow background objects, overlapping fruit, extreme lighting, blur, and hidden fruit can reduce reliability. Thresholds are intentionally kept in `smartbanana.py` so they can be calibrated for the final camera environment.
+Shelf-life output follows FAO ambient-condition guidance: 4–10 days for mature-green bananas and 2–4 days for ripe bananas. Overripe and spoiled results display handling guidance because the cited source does not define a universal remaining-day value for those conditions.
+
+Single-image, batch-image, and sampled-video results can be downloaded as illustrated PDF reports. Batch and video reports begin with an overall summary of distributions and average measurements. Each analysed image or frame then receives one landscape page containing the original image, segmentation mask, annotated analysis, measurements, recommendation, method note, and safety disclaimer. CSV export remains available only for inspection-history data.
+
+This is an external visual assessment, not a food-safety test. Complex backgrounds, yellow background objects, overlapping fruit, extreme lighting, blur, and hidden fruit can reduce reliability. The BBCH decision boundaries remain fixed; only acquisition-dependent HSV colour bands should be recalibrated for a different camera or lighting environment.

@@ -13,13 +13,14 @@ import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
+from interactive_overlay import show_colour_overlay
 from smartbanana import (
     Analysis,
     AnalysisError,
     analyse_bytes,
     assess_image,
     clear_history,
-    create_pdf,
+    create_pdf_report,
     load_history,
     mask_from_drawing,
     save_record,
@@ -27,6 +28,53 @@ from smartbanana import (
 
 
 st.set_page_config(page_title="SmartBanana", page_icon="🍌", layout="wide")
+
+
+def require_safety_agreement() -> None:
+    """Block analysis features until the user accepts the safety disclaimer."""
+    st.session_state.setdefault("safety_agreement", None)
+    decision = st.session_state.safety_agreement
+    if decision is True:
+        return
+
+    st.title("SmartBanana safety notice")
+    if decision is False:
+        st.error(
+            "You did not accept the safety disclaimer, so access to SmartBanana has ended for this session."
+        )
+        st.write(
+            "Close this browser tab to quit the system. Open a new session if you want to review the agreement again."
+        )
+        st.stop()
+
+    with st.container(border=True):
+        st.warning(
+            "SmartBanana is a visual decision-support tool, not a food-safety test.",
+            icon=":material/warning:",
+        )
+        st.markdown(
+            """
+            - Results assess only the banana surface visible in the submitted image or video frame.
+            - Lighting, background colour, blur, obstruction and camera quality can produce an incorrect result.
+            - The system cannot detect internal spoilage, contamination, odour, texture or every unsafe condition.
+            - Do not consume a banana that is mouldy, leaking, smells unusual or otherwise appears unsafe, regardless of the result.
+            - By continuing, you acknowledge these limitations and accept responsibility for how the result is used.
+            """
+        )
+        with st.container(horizontal=True):
+            if st.button(
+                "I agree and continue", type="primary", icon=":material/check_circle:"
+            ):
+                st.session_state.safety_agreement = True
+                st.rerun()
+            if st.button("I do not agree", icon=":material/cancel:"):
+                st.session_state.safety_agreement = False
+                st.rerun()
+    st.stop()
+
+
+require_safety_agreement()
+
 st.markdown(
     """
     <style>
@@ -46,6 +94,7 @@ DB_PATH = Path("smartbanana.db")
 
 # Shared presentation and export helpers
 
+
 def rgb(image):
     """Convert OpenCV's BGR images to the RGB order expected by Streamlit."""
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if image.ndim == 3 else image
@@ -62,6 +111,12 @@ def records_csv(records: list[dict]) -> bytes:
     return output.getvalue().encode("utf-8")
 
 
+@st.cache_data(show_spinner=False, max_entries=6)
+def report_bytes(analyses: tuple[Analysis, ...], title: str) -> bytes:
+    """Cache potentially expensive illustrated report generation by its inputs."""
+    return create_pdf_report(analyses, title)
+
+
 def show_result(result: Analysis, key: str = "result") -> None:
     """Render one analysis result, its evidence, measurements, and PDF export."""
     r = result.record
@@ -69,32 +124,69 @@ def show_result(result: Analysis, key: str = "result") -> None:
     cols[0].metric("Ripeness", r["ripeness_stage"])
     cols[1].metric("Quality", f"Grade {r['quality_grade']}")
     cols[2].metric("Defect area", f"{r['defect_percentage']}%")
-    cols[3].metric("Shelf life", f"{r['shelf_life_days']} day(s)")
+    cols[3].metric("Shelf life", r["shelf_life_days"])
     cols[4].metric("Confidence", f"{r['confidence']}%")
     st.info(r["recommendation"])
 
     tabs = st.tabs(["Visual evidence", "Measurements"])
     with tabs[0]:
-        views = st.columns(4)
+        st.caption(
+            "Hover over a green, yellow or red highlighted area to see its percentage of the detected banana surface."
+        )
+        with st.container(horizontal_alignment="center"):
+            show_colour_overlay(
+                result.overlay,
+                result.region_map,
+                green_percentage=r["green_percentage"],
+                yellow_percentage=r["yellow_percentage"],
+                defect_percentage=r["defect_percentage"],
+                key=f"hover_{key}",
+            )
+        views = st.columns(3)
         views[0].image(rgb(result.original), caption="Original", width="stretch")
-        views[1].image(rgb(result.enhanced), caption="Gaussian + CLAHE", width="stretch")
+        views[1].image(
+            rgb(result.enhanced), caption="Gaussian + CLAHE", width="stretch"
+        )
         views[2].image(result.banana_mask, caption="Banana mask", width="stretch")
-        views[3].image(rgb(result.overlay), caption="Defects in red", width="stretch")
     with tabs[1]:
         left, right = st.columns([1, 2])
-        colour_data = pd.DataFrame({"Percentage": [r["green_percentage"], r["yellow_percentage"], r["brown_percentage"]]}, index=["Green", "Yellow", "Brown / dark"])
+        colour_data = pd.DataFrame(
+            {
+                "Percentage": [
+                    r["green_percentage"],
+                    r["yellow_percentage"],
+                    r["brown_percentage"],
+                ]
+            },
+            index=["Green", "Yellow", "Brown / dark"],
+        )
         left.bar_chart(colour_data, color="#84cc16")
-        right.dataframe(pd.DataFrame({"Value": [str(value) for value in r.values()]}, index=r), width="stretch")
-    st.download_button("Download PDF report", create_pdf(result), f"SmartBanana_{Path(r['file_name']).stem}.pdf", "application/pdf", key=f"pdf_{key}")
+        right.dataframe(
+            pd.DataFrame({"Value": [str(value) for value in r.values()]}, index=r),
+            width="stretch",
+        )
+    st.download_button(
+        "Download PDF report",
+        report_bytes((result,), "SmartBanana Inspection Report"),
+        f"SmartBanana_{Path(r['file_name']).stem}.pdf",
+        "application/pdf",
+        key=f"pdf_{key}",
+        icon=":material/picture_as_pdf:",
+    )
 
 
 def manual_boundary_editor(result: Analysis) -> None:
     """Let the user replace the automatic mask with a mouse-drawn polygon."""
-    enabled = st.checkbox("Manually correct the banana boundary", key=f"manual_enabled_{result.record['record_id']}")
+    enabled = st.checkbox(
+        "Manually correct the banana boundary",
+        key=f"manual_enabled_{result.record['record_id']}",
+    )
     if not enabled:
         return
 
-    st.caption("Click points around the banana. Right-click the final point to close and fill the polygon; use the toolbar to undo or reset.")
+    st.caption(
+        "Click points around the banana. Right-click the final point to close and fill the polygon; use the toolbar to undo or reset."
+    )
     height, width = result.original.shape[:2]
     # Limit canvas width while retaining the original aspect ratio.
     scale = min(1.0, 700 / width)
@@ -110,7 +202,11 @@ def manual_boundary_editor(result: Analysis) -> None:
         display_toolbar=True,
         key=f"manual_canvas_{result.record['record_id']}",
     )
-    if st.button("Apply manual boundary", type="primary", key=f"apply_manual_{result.record['record_id']}"):
+    if st.button(
+        "Apply manual boundary",
+        type="primary",
+        key=f"apply_manual_{result.record['record_id']}",
+    ):
         try:
             mask = mask_from_drawing(canvas.image_data, result.original.shape[:2])
             corrected = assess_image(
@@ -154,14 +250,20 @@ if page == "Analyse":
             st.error(str(error))
     if result := st.session_state.get("single_result"):
         if st.session_state.pop("boundary_applied", False):
-            st.success("Manual boundary applied. All measurements and the PDF now use the corrected mask.")
+            st.success(
+                "Manual boundary applied. All measurements and the PDF now use the corrected mask."
+            )
         show_result(result, "single")
         manual_boundary_editor(result)
 
 # Batch workspace: invalid files are reported without stopping the remaining files.
 elif page == "Batch":
     st.subheader("Batch inspection")
-    files = st.file_uploader("Upload multiple banana images", ["jpg", "jpeg", "png"], accept_multiple_files=True)
+    files = st.file_uploader(
+        "Upload multiple banana images",
+        ["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+    )
     if files and st.button("Analyse batch", type="primary"):
         results, errors = [], []
         progress = st.progress(0)
@@ -181,8 +283,19 @@ elif page == "Batch":
         records = [result.record for result in results]
         st.success(f"Processed {len(results)} image(s).")
         st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
-        st.download_button("Download batch CSV", records_csv(records), "SmartBanana_batch.csv", "text/csv")
-        summary = pd.DataFrame(records)["ripeness_stage"].value_counts().rename_axis("Ripeness").to_frame("Images")
+        st.download_button(
+            "Download batch PDF report",
+            report_bytes(tuple(results), "SmartBanana Batch Analysis Report"),
+            "SmartBanana_batch_report.pdf",
+            "application/pdf",
+            icon=":material/picture_as_pdf:",
+        )
+        summary = (
+            pd.DataFrame(records)["ripeness_stage"]
+            .value_counts()
+            .rename_axis("Ripeness")
+            .to_frame("Images")
+        )
         st.bar_chart(summary, color="#65a30d")
         for index, result in enumerate(results):
             with st.expander(result.record["file_name"]):
@@ -209,7 +322,9 @@ elif page == "Video":
                 break
             if frame_index % interval == 0:
                 try:
-                    result = assess_image(frame, f"{video.name} frame {frame_index}", "video frame")
+                    result = assess_image(
+                        frame, f"{video.name} frame {frame_index}", "video frame"
+                    )
                     save_record(result.record, DB_PATH)
                     results.append(result)
                 except AnalysisError:
@@ -224,8 +339,15 @@ elif page == "Video":
     if results:
         records = [result.record for result in results]
         st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
-        st.download_button("Download video results", records_csv(records), "SmartBanana_video.csv", "text/csv")
-        st.image(rgb(results[-1].overlay), caption="Last sampled frame", width="stretch")
+        st.download_button(
+            "Download video PDF report",
+            report_bytes(tuple(results), "SmartBanana Video Analysis Report"),
+            "SmartBanana_video_report.pdf",
+            "application/pdf",
+            icon=":material/picture_as_pdf:",
+        )
+        st.subheader("Last successfully analysed frame")
+        show_result(results[-1], "video_last")
 
 # History workspace
 elif page == "History":
@@ -233,7 +355,12 @@ elif page == "History":
     records = load_history(DB_PATH)
     if records:
         st.dataframe(pd.DataFrame(records), width="stretch", hide_index=True)
-        st.download_button("Download history CSV", records_csv(records), "SmartBanana_history.csv", "text/csv")
+        st.download_button(
+            "Download history CSV",
+            records_csv(records),
+            "SmartBanana_history.csv",
+            "text/csv",
+        )
         if st.checkbox("I want to delete all history") and st.button("Delete history"):
             clear_history(DB_PATH)
             st.rerun()
@@ -243,7 +370,9 @@ elif page == "History":
 # About workspace
 else:
     st.subheader("How SmartBanana works")
-    st.write("SmartBanana follows the assignment report exactly: image resizing → Gaussian filtering → CLAHE → HSV segmentation → morphology → largest-contour isolation → peel-colour and connected-defect analysis → rule-based recommendations.")
+    st.write(
+        "SmartBanana follows the assignment report exactly: image resizing → Gaussian filtering → CLAHE → HSV segmentation → morphology → largest-contour isolation → peel-colour and connected-defect analysis → rule-based recommendations."
+    )
     st.markdown("""
     **Best capture conditions**
 
@@ -253,9 +382,11 @@ else:
 
     **Interpretation**
 
-    - Grade A: less than 5% detected defect area.
-    - Grade B: 5% to less than 10% detected defect area.
-    - Grade C: 10% or more detected defect area.
+    - Grade A: less than 20% detected surface defects.
+    - Grade B: 20% to 50% detected surface defects.
+    - Grade C: more than 50% detected surface defects.
+    - The 20% and 50% boundaries follow the published BBCH scale for edible Musaceae.
+    - FAO ambient-life ranges are shown for unripe and ripe bananas; later stages use handling guidance because no universal remaining-day value is stated.
 
     Results describe visible external condition only; they are not a food-safety or internal-quality test.
     """)
